@@ -1,4 +1,4 @@
-name: Build SnapKM dylib
+name: Build SnapKM sideload dylib
 
 on:
   workflow_dispatch:
@@ -9,36 +9,41 @@ on:
       - '**/*.h'
       - '**/*.xm'
       - 'Makefile'
-      - 'control'
       - '.github/workflows/build.yml'
 
+permissions:
+  contents: read
+
 jobs:
-  package:
+  build:
     runs-on: macos-15
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: Install Theos
+      - name: Install Theos and signing tool
         run: |
           git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          brew install ldid
       - name: Install iOS SDK
         run: |
           git clone --depth 1 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
           mkdir -p "$HOME/theos/sdks"
           find "$RUNNER_TEMP/theos-sdks" -maxdepth 1 -name '*.sdk' -type d -exec cp -R {} "$HOME/theos/sdks/" \;
           ls "$HOME/theos/sdks"
-      - name: Build dylib
-        run: make FINALPACKAGE=1
-      - name: Collect dylib
+      - name: Build standalone dynamic library
+        run: |
+          sed -e 's/^TWEAK_NAME = SnapKM/LIBRARY_NAME = SnapKM/' -e 's@/tweak.mk@/library.mk@' Makefile > Makefile.sideload
+          make -f Makefile.sideload -j2 FINALPACKAGE=1
+      - name: Inspect and collect dylib
         run: |
           mkdir -p output
-          find .theos/obj -type f -name 'SnapKM.dylib' -exec cp {} output/SnapKM.dylib \;
+          find .theos/obj -type f -name SnapKM.dylib -print -exec cp {} output/SnapKM.dylib \;
           test -s output/SnapKM.dylib
+          file output/SnapKM.dylib
+          otool -L output/SnapKM.dylib
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
-          name: SnapKM-dylib
+          name: SnapKM-sideload-dylib
           path: output/SnapKM.dylib
           if-no-files-found: error

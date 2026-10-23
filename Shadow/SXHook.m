@@ -172,6 +172,10 @@ static void SXRecordGap(NSString *feature, NSString *reason) {
   poll();
 }
 
++ (void)recordGap:(NSString *)feature reason:(NSString *)reason {
+  SXRecordGap(feature, reason);
+}
+
 + (NSArray<NSString *> *)recordedGaps {
   return [SXHookGaps() copy];
 }

@@ -35,6 +35,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Lists indexed entries for a category, newest first.
 + (nullable NSArray<NSDictionary<NSString *, id> *> *)entriesForCategory:(NSString *)category;
 
+/// Records one chat message for `saveChats`. `text` may be nil when the content
+/// accessor could not be resolved (see SXPrivacy) -- the conversation/message id and
+/// timestamp are still recorded so the event isn't silently lost.
++ (void)recordChatMessageConversationId:(NSString *)conversationId
+                               messageId:(nullable NSString *)messageId
+                                    text:(nullable NSString *)text;
+
 /// Shows the "saved" confirmation. One path for both the button and auto-save so the
 /// feedback is identical.
 + (void)confirmSavedFrom:(nullable UIView *)sourceView;

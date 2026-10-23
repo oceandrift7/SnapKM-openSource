@@ -28,6 +28,19 @@ static void SXRecordGap(NSString *feature, NSString *reason) {
   SXHookGap(feature, reason);
 }
 
+/// Strips frame offsets from a type encoding so two encodings of the same signature
+/// compare equal. `v24@0:8@16` and `v32@0:8@16@24` differ in size, but `@16@0:8` and
+/// `@24@0:8` (same types, different argument padding) must not be mistaken for a
+/// mismatch, and the digits carry nothing but layout.
+static NSString *SXSignatureKey(const char *encoding) {
+  NSMutableString *key = [NSMutableString string];
+  for (const char *c = encoding; c != NULL && *c != '\0'; c++) {
+    if (*c < '0' || *c > '9')
+      [key appendFormat:@"%c", *c];
+  }
+  return key;
+}
+
 @implementation SXHook
 
 + (BOOL)classExists:(NSString *)className {
@@ -88,15 +101,51 @@ static void SXRecordGap(NSString *feature, NSString *reason) {
     return NO;
   }
 
-  BOOL added = class_addMethod(targetClass, original,
-                               method_getImplementation(replacementMethod),
-                               method_getTypeEncoding(replacementMethod));
-  if (added) {
-    class_replaceMethod(targetClass, replacement, method_getImplementation(originalMethod),
-                        method_getTypeEncoding(originalMethod));
-  } else {
-    method_exchangeImplementations(originalMethod, replacementMethod);
+  // A replacement whose types differ from the original is a crash waiting for the first
+  // call (an object returned where a struct is expected, a missing argument). Snapchat
+  // changes signatures between releases, so refuse and report rather than trust it.
+  NSString *originalSig = SXSignatureKey(method_getTypeEncoding(originalMethod));
+  NSString *replacementSig = SXSignatureKey(method_getTypeEncoding(replacementMethod));
+  if (![originalSig isEqualToString:replacementSig]) {
+    SXRecordGap(className,
+                ([NSString stringWithFormat:@"%@ signature mismatch (have %@, hook expects %@)",
+                                           NSStringFromSelector(original), originalSig,
+                                           replacementSig]));
+    return NO;
   }
+
+  // Idempotence and inheritance. If the replacement selector already resolves on the
+  // target, either this exact hook is installed or an ancestor already carries it.
+  // Swapping again would un-hook the method; hooking a subclass over a hooked ancestor
+  // makes the original and the hook call each other forever via `super`. Both are
+  // worse than leaving the ancestor's hook to cover the subclass.
+  if (class_getInstanceMethod(targetClass, replacement) != NULL) {
+    SXDebugLog("already hooked %@ -[%@]", className, NSStringFromSelector(original));
+    return YES;
+  }
+
+  IMP replacementImp = method_getImplementation(replacementMethod);
+  const char *replacementTypes = method_getTypeEncoding(replacementMethod);
+  IMP originalImp = method_getImplementation(originalMethod);
+  const char *originalTypes = method_getTypeEncoding(originalMethod);
+
+  // The hook body calls `[self <replacement>]` to reach the original, and `self` is a
+  // Snapchat instance. The replacement selector therefore has to exist on the TARGET
+  // class. Exchanging against the owner's Method would leave the target without it and
+  // crash with "unrecognized selector" on the first call.
+  if (!class_addMethod(targetClass, replacement, replacementImp, replacementTypes)) {
+    SXRecordGap(className, ([NSString stringWithFormat:@"could not add %@",
+                                                       NSStringFromSelector(replacement)]));
+    return NO;
+  }
+
+  // If only a superclass implements `original`, give the target its own copy first so
+  // the exchange below overrides it here without touching the superclass. No-op when
+  // the target already implements it locally.
+  class_addMethod(targetClass, original, originalImp, originalTypes);
+
+  method_exchangeImplementations(class_getInstanceMethod(targetClass, original),
+                                 class_getInstanceMethod(targetClass, replacement));
 
   SXDebugLog("hooked %@ -[%@]", className, NSStringFromSelector(original));
   return YES;
@@ -172,12 +221,12 @@ static void SXRecordGap(NSString *feature, NSString *reason) {
   poll();
 }
 
-+ (void)recordGap:(NSString *)feature reason:(NSString *)reason {
-  SXRecordGap(feature, reason);
-}
-
 + (NSArray<NSString *> *)recordedGaps {
   return [SXHookGaps() copy];
+}
+
++ (void)recordGap:(NSString *)feature reason:(NSString *)reason {
+  SXRecordGap(feature, reason);
 }
 
 @end

@@ -5,6 +5,7 @@
 #import "SXHook.h"
 #import "SXLog.h"
 #import "SXSettings.h"
+#import "../Features/SXCustomHooks.h"
 #import "../Features/SXLogs.h"
 
 typedef NS_ENUM(NSInteger, SXSection) {
@@ -44,6 +45,9 @@ typedef NS_ENUM(NSInteger, SXRowDiagnostics) {
   SXRowCloakAntiDetect = 0,
   SXRowDebugLogging,
   SXRowViewLogs,
+  SXRowAdHookList,
+  SXRowViewHookList,
+  SXRowScanForTargets,
   SXRowDiagnosticsCount
 };
 
@@ -225,7 +229,10 @@ static BOOL SXSettingsPresented = NO;
     case SXSectionLocation:
       return @[ @"Change Location", @"Coordinates", @"Reset" ][indexPath.row];
     case SXSectionDiagnostics:
-      return @[ @"Cloak Anti-Detection", @"Debug Logging", @"View Logs" ][indexPath.row];
+      return @[
+        @"Cloak Anti-Detection", @"Debug Logging", @"View Logs", @"Ad Hook List",
+        @"View Hook List", @"Scan For Hook Targets"
+      ][indexPath.row];
     case SXSectionAbout:
       return [SXLogs collectedText].length > 0 ? @"Hook Gaps" : @"No gaps recorded";
     default:
@@ -242,11 +249,31 @@ static BOOL SXSettingsPresented = NO;
 
   NSString *key = [self keyForIndexPath:indexPath];
   if (key == nil) {
+    cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.detailTextLabel.text =
         indexPath.section == SXSectionDiagnostics ? [SXLogs lineCountLabel] : nil;
     if (indexPath.section == SXSectionAbout)
       cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)[SXHook recordedGaps].count];
+    if (indexPath.section == SXSectionDiagnostics) {
+      if (indexPath.row == SXRowAdHookList) {
+        cell.detailTextLabel.text =
+            [NSString stringWithFormat:@"%lu entr%@", (unsigned long)[SXCustomHooks adHookEntries].count,
+                                       [SXCustomHooks adHookEntries].count == 1 ? @"y" : @"ies"];
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+      } else if (indexPath.row == SXRowViewHookList) {
+        cell.detailTextLabel.text =
+            [NSString stringWithFormat:@"%lu entr%@", (unsigned long)[SXCustomHooks viewHookEntries].count,
+                                       [SXCustomHooks viewHookEntries].count == 1 ? @"y" : @"ies"];
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+      } else if (indexPath.row == SXRowScanForTargets) {
+        cell.detailTextLabel.text = nil;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+      }
+    }
     return cell;
   }
 
@@ -274,6 +301,18 @@ static BOOL SXSettingsPresented = NO;
 
   if (indexPath.section == SXSectionDiagnostics && indexPath.row == SXRowViewLogs) {
     [SXLogs presentFrom:self];
+    return;
+  }
+  if (indexPath.section == SXSectionDiagnostics && indexPath.row == SXRowAdHookList) {
+    [self promptAddEntryToAdList:YES from:self];
+    return;
+  }
+  if (indexPath.section == SXSectionDiagnostics && indexPath.row == SXRowViewHookList) {
+    [self promptAddEntryToAdList:NO from:self];
+    return;
+  }
+  if (indexPath.section == SXSectionDiagnostics && indexPath.row == SXRowScanForTargets) {
+    [self promptScanKeywordFrom:self];
     return;
   }
   if (indexPath.section == SXSectionAbout) {
@@ -324,6 +363,89 @@ static BOOL SXSettingsPresented = NO;
                                             [defaults setDouble:[parts[1] doubleValue]
                                                          forKey:SXKeySpoofLongitude];
                                             SXLog("spoof set to %@", text);
+                                          }]];
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                            style:UIAlertActionStyleCancel
+                                          handler:nil]];
+  [presenter presentViewController:sheet animated:YES completion:nil];
+}
+
+/// Shared editor for both hook lists -- `isAdList` picks which one. Shows the current
+/// entries (tap one to remove it) with an "Add" action for a new one; existing entries
+/// are read via SXCustomHooks and mutated through it too, so this view never touches
+/// NSUserDefaults directly.
+- (void)promptAddEntryToAdList:(BOOL)isAdList from:(UIViewController *)presenter {
+  NSArray<NSString *> *entries =
+      isAdList ? [SXCustomHooks adHookEntries] : [SXCustomHooks viewHookEntries];
+
+  UIAlertController *sheet = [UIAlertController
+      alertControllerWithTitle:isAdList ? @"Ad Hook List" : @"View Hook List"
+                       message:@"Class.selector to suppress, e.g. "
+                               @"SCDiscoverAdUnit.loadAdView or "
+                               @"SCAdTracker.shouldShowImpression: -- find candidates "
+                               @"with Scan For Hook Targets first."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [sheet addTextFieldWithConfigurationHandler:^(UITextField *field) {
+    field.placeholder = @"ClassName.selector";
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+  }];
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Add"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *action) {
+                                            NSString *text = sheet.textFields.firstObject.text;
+                                            if (text.length == 0)
+                                              return;
+                                            if (isAdList)
+                                              [SXCustomHooks addAdHookEntry:text];
+                                            else
+                                              [SXCustomHooks addViewHookEntry:text];
+                                            SXLog("added %@ entry: %@", isAdList ? @"ad" : @"view", text);
+                                            [self.tableView
+                                                reloadSections:[NSIndexSet indexSetWithIndex:SXSectionDiagnostics]
+                                                withRowAnimation:UITableViewRowAnimationAutomatic];
+                                          }]];
+  if (entries.count > 0) {
+    [sheet addAction:[UIAlertAction
+                          actionWithTitle:[NSString stringWithFormat:@"Remove Last (%@)", entries.lastObject]
+                                    style:UIAlertActionStyleDestructive
+                                  handler:^(UIAlertAction *action) {
+                                    if (isAdList)
+                                      [SXCustomHooks removeAdHookEntryAtIndex:entries.count - 1];
+                                    else
+                                      [SXCustomHooks removeViewHookEntryAtIndex:entries.count - 1];
+                                    [self.tableView
+                                        reloadSections:[NSIndexSet indexSetWithIndex:SXSectionDiagnostics]
+                                        withRowAnimation:UITableViewRowAnimationAutomatic];
+                                  }]];
+  }
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                            style:UIAlertActionStyleCancel
+                                          handler:nil]];
+  [presenter presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)promptScanKeywordFrom:(UIViewController *)presenter {
+  UIAlertController *sheet = [UIAlertController
+      alertControllerWithTitle:@"Scan For Hook Targets"
+                       message:@"Searches Snapchat's own classes (not Apple's) for a "
+                               @"name match and lists them, with their methods, in "
+                               @"View Logs. Try \"ad\", \"sponsor\", \"analytics\", "
+                               @"\"impression\", or \"story\"."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [sheet addTextFieldWithConfigurationHandler:^(UITextField *field) {
+    field.placeholder = @"keyword";
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+  }];
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Scan"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *action) {
+                                            NSString *keyword = sheet.textFields.firstObject.text;
+                                            if (keyword.length == 0)
+                                              return;
+                                            [SXCustomHooks scanForCandidatesMatching:keyword];
+                                            [SXLogs presentFrom:presenter];
                                           }]];
   [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                             style:UIAlertActionStyleCancel

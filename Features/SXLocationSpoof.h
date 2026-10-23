@@ -8,33 +8,36 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Snap Map location spoof.
 ///
-/// The load-bearing behaviour is recovered from a literal log string in the shipped
-/// binary:
+/// Location reaches an app by two routes, and both are covered:
 ///
-/// ```
-/// " caller-gated spoof (system callers get REAL) spoof (main bundle)"
-/// ```
+///  1. Property reads — `-[CLLocationManager location]` and Snapchat's own
+///     `SCLocationManager` accessors. Gated by the *calling image*: a read made from
+///     Apple's own code (`/System`, `/usr/lib`) gets the real fix, a read made from
+///     Snapchat or this tweak gets the spoof.
+///  2. Delegate callbacks — `locationManager:didUpdateLocations:` and its legacy
+///     two-location form. This is how apps normally receive fixes, so a spoof that only
+///     covered (1) would leave the map showing the real position. Hooked per delegate
+///     class the first time a manager starts updating, and only for delegate classes
+///     that do not live in a system image.
 ///
-/// Spoofed coordinates reach the Snap Map UI while Snapchat's own system-level callers
-/// keep the real location. Suppressing the upload separately would desynchronise the
-/// two — the map would show one place while the server records another.
-///
-/// INFERRED: the gate keys off the calling bundle rather than the call site alone.
-/// UNKNOWN: the exact caller predicate, which is why `isSystemCaller` is a single
-/// documented seam for the next investigation to narrow.
+/// The spoof keeps the real fix's accuracy, course, speed and timestamp and replaces
+/// only the coordinate, so consumers see a plausible fix rather than a synthetic one.
 @interface SXLocationSpoof : NSObject
 
 + (void)install;
 
-/// The configured spoofed coordinate, or nil when spoofing is off or unset.
-+ (nullable CLLocation *)spoofedLocation;
+/// A copy of `base` relocated to the configured coordinate, or nil when spoofing is off,
+/// the coordinate is unset, or it is not a valid coordinate. `base` may be nil (no fix
+/// yet), in which case a fresh location with a nominal accuracy is produced.
++ (nullable CLLocation *)spoofedLocationBasedOn:(nullable CLLocation *)base;
 
-/// The decision seam. Returns YES when `location` should pass through untouched
-/// because the caller is Snapchat's own system surface.
-+ (BOOL)isSystemCaller;
+/// YES when `address` (a return address) lies in an Apple system image. Unresolvable
+/// addresses report YES, so a failed lookup falls back to the real location.
++ (BOOL)isSystemCallerAddress:(const void *)address;
 
-/// Hook body. Returns what the caller should receive given the current settings.
-+ (CLLocation *)resolvedLocation:(CLLocation *)location;
+/// Hook body for property reads. Returns what the caller should receive.
++ (nullable CLLocation *)resolvedLocation:(nullable CLLocation *)location
+                                   caller:(const void *)caller;
 
 @end
 

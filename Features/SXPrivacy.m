@@ -5,6 +5,7 @@
 #import "../Shadow/SXHook.h"
 #import "../Shadow/SXLog.h"
 #import "../Shadow/SXSettings.h"
+#import "SXSaveMedia.h"
 
 /// Longer than the 10s default for chat classes, which Snapchat loads late.
 static const NSTimeInterval kSXChatHookTimeout = 20.0;
@@ -77,6 +78,20 @@ static const NSTimeInterval kSXChatHookTimeout = 20.0;
 
 - (void)sx_markSnapAsInvalidForConversationId:(NSString *)conversationId
                                     messageId:(NSString *)messageId {
+  // Deletion is the moment a message is about to disappear, which makes it the
+  // natural saveChats trigger regardless of whether deletion itself is suppressed
+  // below -- a message kept locally by disableMessageDeletion doesn't need saving
+  // again, but a message that *does* get deleted is exactly the one worth saving.
+  //
+  // UNKNOWN, same as SXSaveMedia's media accessor: this call carries only the
+  // conversation and message ids, not the message content, so the text field is
+  // recorded empty. The event itself (who/when) is never lost; only the body is.
+  if ([SXSettings shared].saveChats) {
+    [SXSaveMedia recordChatMessageConversationId:conversationId messageId:messageId text:nil];
+    SXDebugLog("chat message recorded (text unavailable from this hook): %@/%@",
+               conversationId, messageId);
+  }
+
   if ([SXSettings shared].disableMessageDeletion) {
     SXDebugLog("deletion suppressed: %@/%@", conversationId, messageId);
     return;

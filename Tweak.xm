@@ -22,6 +22,7 @@
 #import "Features/SXLogs.h"
 #import "Features/SXLocationSpoof.h"
 #import "Features/SXAntiDetect.h"
+#import "Features/SXCustomHooks.h"
 
 #pragma mark - Feature registry
 
@@ -32,6 +33,7 @@ static void SXRegisterFeatures(void) {
   [SXFeatureGate registerFeature:@"save_media" defaultEnabled:YES];
   [SXFeatureGate registerFeature:@"location_spoof" defaultEnabled:YES];
   [SXFeatureGate registerFeature:@"anti_detect" defaultEnabled:YES];
+  [SXFeatureGate registerFeature:@"custom_hooks" defaultEnabled:YES];
 }
 
 static void SXInstallFeatures(void) {
@@ -43,15 +45,30 @@ static void SXInstallFeatures(void) {
     [SXLocationSpoof install];
   if ([SXFeatureGate isEnabled:@"anti_detect"])
     [SXAntiDetect install];
+  // disableAds / invisibleViewing: user-supplied Class.selector entries, validated
+  // and installed by SXCustomHooks -- see its header for why these aren't
+  // hardcoded. A no-op when both entry lists are empty, which they are by default.
+  if ([SXFeatureGate isEnabled:@"custom_hooks"])
+    [SXCustomHooks install];
 }
 
 #pragma mark - Settings entry point
 
-/// Holds the bar-button action. A real object is required because UIKit actions are
-/// selector messages; a C function cannot receive one.
+/// Three-finger long press anywhere in the app opens the panel. Snapchat's UI is a
+/// custom paged camera/chat stack with no stable navigation bar to attach a button to,
+/// and its launch callbacks have already run by the time a tweak can react, so a window
+/// level gesture is the one entry point that does not depend on either.
+///
+/// A dedicated subclass lets the installer recognise its own recogniser and stay
+/// idempotent across repeated activations.
+@interface SXEntryGesture : UILongPressGestureRecognizer
+@end
+@implementation SXEntryGesture
+@end
+
 @interface SXSettingsEntry : NSObject
 + (instancetype)shared;
-- (void)installOnNavigationBar:(UINavigationController *)nav;
+- (void)installOnWindow:(UIWindow *)window;
 @end
 
 @implementation SXSettingsEntry
@@ -65,83 +82,72 @@ static void SXInstallFeatures(void) {
   return shared;
 }
 
-- (void)installOnNavigationBar:(UINavigationController *)nav {
-  if (nav == nil || nav.topViewController == nil)
+- (void)installOnWindow:(UIWindow *)window {
+  if (window == nil)
     return;
-
-  // Idempotent: launch can be reported more than once and the button must not stack.
-  for (UIBarButtonItem *existing in nav.topViewController.navigationItem.rightBarButtonItems) {
-    if ([existing.accessibilityIdentifier isEqualToString:@"snapkm.settings.entry"])
+  for (UIGestureRecognizer *existing in window.gestureRecognizers) {
+    if ([existing isKindOfClass:[SXEntryGesture class]])
       return;
   }
 
-  UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithTitle:@"SnapKM"
-                                                            style:UIBarButtonItemStylePlain
-                                                           target:self
-                                                           action:@selector(open)];
-  item.accessibilityIdentifier = @"snapkm.settings.entry";
-  nav.topViewController.navigationItem.rightBarButtonItems = @[ item ];
-  SXLog("settings entry point installed");
+  SXEntryGesture *gesture =
+      [[SXEntryGesture alloc] initWithTarget:self action:@selector(handle:)];
+  gesture.numberOfTouchesRequired = 3;
+  gesture.minimumPressDuration = 0.8;
+  // Must never swallow Snapchat's own touches.
+  gesture.cancelsTouchesInView = NO;
+  gesture.delaysTouchesBegan = NO;
+  gesture.delaysTouchesEnded = NO;
+  [window addGestureRecognizer:gesture];
+  SXLog("settings gesture installed (3-finger long press)");
 }
 
-- (void)open {
+- (void)handle:(UILongPressGestureRecognizer *)gesture {
+  if (gesture.state != UIGestureRecognizerStateBegan)
+    return;
   [SXSettingsViewController presentFrom:[SXSettingsViewController topViewController]];
 }
 
 @end
 
-typedef BOOL (*SXDidFinishLaunchingIMP)(id, SEL, UIApplication *, NSDictionary *);
-
-static SXDidFinishLaunchingIMP SXOOriginalDidFinishLaunching = NULL;
-
-/// Swapped in for the app delegate's launch callback.
-static BOOL SXDidFinishLaunching(id self, SEL _cmd, UIApplication *application,
-                                 NSDictionary *launchOptions) {
-  // Install after Snapchat finishes its own launch so its navigation stack exists and
-  // the button lands on the real root controller.
-  dispatch_async(dispatch_get_main_queue(), ^{
-    UIViewController *front = [SXSettingsViewController topViewController];
-    UINavigationController *nav =
-        [front isKindOfClass:[UINavigationController class]] ? (UINavigationController *)front
-                                                             : front.navigationController;
-    [[SXSettingsEntry shared] installOnNavigationBar:nav];
-  });
-
-  return SXOOriginalDidFinishLaunching ? SXOOriginalDidFinishLaunching(self, _cmd, application, launchOptions)
-                                       : YES;
+static UIWindow *SXActiveWindow(void) {
+  UIApplication *app = UIApplication.sharedApplication;
+  for (UIScene *scene in app.connectedScenes) {
+    if (![scene isKindOfClass:[UIWindowScene class]])
+      continue;
+    UIWindowScene *windowScene = (UIWindowScene *)scene;
+    if (windowScene.activationState != UISceneActivationStateForegroundActive)
+      continue;
+    for (UIWindow *window in windowScene.windows) {
+      if (window.isKeyWindow)
+        return window;
+    }
+    if (windowScene.windows.firstObject)
+      return windowScene.windows.firstObject;
+  }
+  return nil;
 }
 
-/// Swaps the app delegate's launch callback. Costs nothing when the delegate is absent
-/// or does not implement the selector — a Snapchat rename must not take down the tweak.
+static void SXTryInstallEntry(void) {
+  [[SXSettingsEntry shared] installOnWindow:SXActiveWindow()];
+}
+
 static void SXInstallSettingsEntryPoint(void) {
-  SEL originalSel = NSSelectorFromString(@"application:didFinishLaunchingWithOptions:");
+  // Activation can fire many times and the first one may precede the key window, so
+  // try on every activation. The installer is idempotent.
+  [[NSNotificationCenter defaultCenter]
+      addObserverForName:UIApplicationDidBecomeActiveNotification
+                  object:nil
+                   queue:NSOperationQueue.mainQueue
+              usingBlock:^(NSNotification *note) {
+                SXTryInstallEntry();
+              }];
 
-  Class delegateClass =
-      NSClassFromString(@"SCAppDelegate") ?: NSClassFromString(@"AppDelegate");
-  if (delegateClass == Nil || ![delegateClass instancesRespondToSelector:originalSel]) {
-    SXLog("app delegate entry point not found -- see Logs for hook gaps");
-    return;
-  }
-
-  Method original = class_getInstanceMethod(delegateClass, originalSel);
-  if (original == NULL)
-    return;
-
-  SXOOriginalDidFinishLaunching = (SXDidFinishLaunchingIMP)method_getImplementation(original);
-
-  // class_addMethod installs our C function, then the original implementation is
-  // moved onto it. This handles a delegate that inherits the launch method, where a
-  // plain exchange would fail to find a local implementation.
-  const char *types = method_getTypeEncoding(original);
-  if (class_addMethod(delegateClass,
-                      NSSelectorFromString(@"sx_application:didFinishLaunchingWithOptions:"),
-                      (IMP)SXDidFinishLaunching, types)) {
-    class_replaceMethod(delegateClass, originalSel, method_getImplementation(original), types);
-  } else {
-    method_exchangeImplementations(
-        original, class_getInstanceMethod(delegateClass,
-                                          NSSelectorFromString(@"sx_application:didFinishLaunchingWithOptions:")));
-  }
+  // Covers a tweak that loads after the app is already active.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   SXTryInstallEntry();
+                 });
 }
 
 #pragma mark - Bootstrap

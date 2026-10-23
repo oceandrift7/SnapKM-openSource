@@ -9,6 +9,7 @@
 
 static NSString *const kSXCategoryAudio = @"Audio";
 static NSString *const kSXCategoryVideo = @"Video";
+static NSString *const kSXCategoryText = @"Text";
 static NSString *const kSXIndexName = @"snap.plist";
 
 /// The only shape of the media accessor confirmed from the interface metadata.
@@ -43,7 +44,7 @@ static NSString *const kSXIndexName = @"snap.plist";
                      .firstObject URLByAppendingPathComponent:@"snap"];
 
   NSFileManager *fm = NSFileManager.defaultManager;
-  for (NSString *category in @[ kSXCategoryAudio, kSXCategoryVideo ]) {
+  for (NSString *category in @[ kSXCategoryAudio, kSXCategoryVideo, kSXCategoryText ]) {
     NSURL *dir = [root URLByAppendingPathComponent:category isDirectory:YES];
     if (![fm fileExistsAtPath:dir.path])
       [fm createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -111,6 +112,26 @@ static NSString *const kSXIndexName = @"snap.plist";
   return [entries isKindOfClass:[NSArray class]] ? entries : nil;
 }
 
+/// `saveChats` support. Text has no payload file of its own -- short enough that the
+/// index entry just carries it, unlike photo/video which are data saved to disk first.
++ (void)recordChatMessageConversationId:(NSString *)conversationId
+                               messageId:(nullable NSString *)messageId
+                                    text:(nullable NSString *)text {
+  NSMutableDictionary *index = [self loadIndex];
+  NSMutableArray *entries = index[kSXCategoryText] ?: [NSMutableArray array];
+  [entries addObject:@{
+    @"conversationId" : conversationId ?: @"",
+    @"messageId" : messageId ?: @"",
+    // Empty when the content accessor could not be resolved (see
+    // SXPrivacy's degrade path) -- the entry still records that a message
+    // existed at this time, which is better than losing the event entirely.
+    @"text" : text ?: @"",
+    @"date" : @((NSInteger)NSDate.date.timeIntervalSince1970),
+  }];
+  index[kSXCategoryText] = entries;
+  [index writeToURL:[self indexURL] atomically:YES];
+}
+
 + (void)confirmSavedFrom:(nullable UIView *)sourceView {
   UIViewController *presenter = [SXSettingsViewController topViewController];
   if (presenter == nil)
@@ -136,31 +157,48 @@ static NSString *const kSXIndexName = @"snap.plist";
 
 #pragma mark - Snapchat hooks
 
-/// Appends a local copy to Snapchat's own save rather than replacing it.
+/// Appends a local copy. Snapchat's own save still runs afterward UNLESS
+/// `replaceSaveButton` is on, in which case SnapKM's save is the only one that
+/// happens — e.g. for the case Snapchat's own save would otherwise notify the
+/// other party, and a local copy is wanted silently instead.
 - (void)sx_savePhotoPost:(id)post {
+  BOOL handledLocally = NO;
   if ([SXSettings shared].saveMedia) {
     NSData *bytes = [self sx_mediaDataForPost:post];
     if (bytes) {
-      if ([SXSaveMedia writeData:bytes category:kSXCategoryVideo extension:@"jpg"])
+      if ([SXSaveMedia writeData:bytes category:kSXCategoryVideo extension:@"jpg"]) {
         [SXSaveMedia confirmSavedFrom:nil];
+        handledLocally = YES;
+      }
     } else {
       // Degrades to Snapchat's behaviour instead of failing; logged so the gap is
       // visible in the log viewer.
       SXLog("save hook: no bytes on photo post (accessor unconfirmed)");
     }
   }
+  if (handledLocally && [SXSettings shared].replaceSaveButton) {
+    SXDebugLog("replace-save-button: skipped Snapchat's own save (photo)");
+    return;
+  }
   [self sx_savePhotoPost:post];
 }
 
 - (void)sx_saveVideoPost:(id)post {
+  BOOL handledLocally = NO;
   if ([SXSettings shared].saveMedia) {
     NSData *bytes = [self sx_mediaDataForPost:post];
     if (bytes) {
-      if ([SXSaveMedia writeData:bytes category:kSXCategoryVideo extension:@"mp4"])
+      if ([SXSaveMedia writeData:bytes category:kSXCategoryVideo extension:@"mp4"]) {
         [SXSaveMedia confirmSavedFrom:nil];
+        handledLocally = YES;
+      }
     } else {
       SXLog("save hook: no bytes on video post (accessor unconfirmed)");
     }
+  }
+  if (handledLocally && [SXSettings shared].replaceSaveButton) {
+    SXDebugLog("replace-save-button: skipped Snapchat's own save (video)");
+    return;
   }
   [self sx_saveVideoPost:post];
 }

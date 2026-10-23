@@ -61,6 +61,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Counts hooks installed and gaps recorded since launch, for the settings panel.
 + (NSArray<NSString *> *)recordedGaps;
 
+/// Record a feature-specific hook gap for the diagnostics panel.
++ (void)recordGap:(NSString *)feature reason:(NSString *)reason;
+
 @end
 
 NS_ASSUME_NONNULL_END

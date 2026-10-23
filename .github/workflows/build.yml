@@ -37,9 +37,12 @@ jobs:
       - name: Inspect and collect dylib
         run: |
           mkdir -p output
-          find .theos/obj -type f -name SnapKM.dylib -print -exec cp {} output/SnapKM.dylib \;
-          test -s output/SnapKM.dylib
+          # Copy the final fat dylib only; recursive find also matches dSYM debug companions.
+          test -s .theos/obj/SnapKM.dylib
+          cp .theos/obj/SnapKM.dylib output/SnapKM.dylib
           file output/SnapKM.dylib
+          lipo -info output/SnapKM.dylib
+          otool -hv -arch arm64 output/SnapKM.dylib | grep -q DYLIB
           otool -L output/SnapKM.dylib
       - name: Upload dylib
         uses: actions/upload-artifact@v4

@@ -27,7 +27,8 @@ SnapKM_FILES = Tweak.xm \
 	Features/SXSaveMedia.m \
 	Features/SXLogs.m \
 	Features/SXLocationSpoof.m \
-	Features/SXAntiDetect.m
+	Features/SXAntiDetect.m \
+	Features/SXCustomHooks.m
 
 SnapKM_CFLAGS = -fobjc-arc -Wall -Wno-unused-variable
 SnapKM_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore CoreText \

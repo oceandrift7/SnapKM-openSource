@@ -1,0 +1,52 @@
+name: Synchronize SnapKM source and build sideload dylib
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.sync/SnapKM-delta.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore source from the uploaded ZIP
+        run: |
+          test -f .sync/SnapKM-delta.zip
+          unzip -oq .sync/SnapKM-delta.zip
+          rm .sync/SnapKM-delta.zip
+          git add -A
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'sync: restore corrected SnapKM source from uploaded ZIP'
+          git push
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+      - name: Install iOS SDK
+        run: |
+          git clone --depth 1 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          mkdir -p "$HOME/theos/sdks"
+          find "$RUNNER_TEMP/theos-sdks" -maxdepth 1 -name '*.sdk' -type d -exec cp -R {} "$HOME/theos/sdks/" \;
+          ls "$HOME/theos/sdks"
+      - name: Compile sideload-compatible dynamic library
+        run: |
+          sed -e 's/^TWEAK_NAME = SnapKM/LIBRARY_NAME = SnapKM/' -e 's@/tweak.mk@/library.mk@' Makefile > Makefile.sideload
+          make -f Makefile.sideload -j2
+      - name: Inspect and collect dylib
+        run: |
+          mkdir -p output
+          find .theos/obj -type f -name 'SnapKM.dylib' -print -exec cp {} output/SnapKM.dylib \;
+          test -s output/SnapKM.dylib
+          file output/SnapKM.dylib
+          otool -L output/SnapKM.dylib
+      - name: Upload sideload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnapKM-sideload-dylib
+          path: output/SnapKM.dylib
+          if-no-files-found: error
